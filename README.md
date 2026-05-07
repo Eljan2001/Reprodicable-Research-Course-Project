@@ -6,7 +6,7 @@
 
 **Data Source** Kaggle (https://www.kaggle.com/datasets/sazidthe1/data-science-salaries)  
 
-**Project That Wil Be Reproduced** (https://www.kaggle.com/code/analyticaobscura/ds-salary-2024)
+**Project that Will Be Reproduced** (https://www.kaggle.com/code/analyticaobscura/ds-salary-2024)
 
 **Planned approach:** The dataset is first cleaned and preprocessed to ensure consistency and accuracy, focusing on standardizing salary values, categorizing experience levels, and refining job titles.  
 A regression analysis is then conducted using log-transformed salary as the dependent variable, with relevant dummy variables included to capture categorical effects. Finally, the results are visualized through an interactive dashboard and plots, providing clear insights and interpretations of the findings.   
