@@ -1,0 +1,356 @@
+---
+title: "Data Science Salaries 2023/2024"
+subtitle: "Reproducible Research Project"
+author: "Dilara Ozdil, Eljan Abbaszada, Paula Gwanchele"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    fig_width: 8
+    fig_height: 5
+  pcleaned_data_document:
+    toc: true
+    number_sections: true
+    fig_width: 7
+    fig_height: 4.5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  echo    = TRUE,
+  fig.align = "center"
+)
+```
+
+# Set working directory to the current folder
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+# Introduction
+
+This report investigates the determinants of data science salaries using a
+cross-sectional dataset of reported compensation. We combine exploratory
+data analysis (EDA) with a fixed-effects regression framework to quantify
+how experience, work model (remote/hybrid/on-site), company size, and
+year affect (log) salary, while absorbing country-level heterogeneity
+through location fixed effects. We then assess the robustness of the main
+findings to (i) restricting the sample to full-time employees, (ii)
+replacing company-location with employee-residence fixed effects, (iii)
+trimming the top 1% of salaries, and (iv) allowing the remote-work effect
+to vary by experience level.
+
+# Data
+
+## Dependencies
+
+```{r libraries}
+required <- c("tidyverse", "fixest", "modelsummary", "scales")
+to_install <- setdiff(required, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install)
+
+library(tidyverse)
+library(scales)
+library(fixest)
+library(modelsummary)
+```
+
+## Load the raw data
+
+```{r load-data}
+raw_data <- read_csv("data_clean.csv")
+glimpse(raw_data)
+```
+
+## Cleaning and feature construction
+
+A single cleaning pipeline is reused by both the EDA and the econometric
+models, removing the duplicated cleaning logic from the two original
+scripts.
+
+```{r clean-data}
+cleaned_data <- raw_data %>%
+  drop_na() %>%
+  filter(salary_in_usd > 0) %>%
+  mutate(
+    experience_level = factor(
+      experience_level,
+      levels = c("Entry-level", "Mid-level", "Senior-level", "Executive-level")
+    ),
+    company_size       = factor(company_size, levels = c("Small", "Medium", "Large")),
+    work_year          = as.factor(work_year),
+    employment_type    = as.factor(employment_type),
+    work_models        = as.factor(work_models),
+    company_location   = as.factor(company_location),
+    employee_residence = as.factor(employee_residence),
+    log_salary         = log(salary_in_usd),
+    job_category = case_when(
+      str_detect(job_title, "Data Scientist")      ~ "Data Science",
+      str_detect(job_title, "Data Engineer")       ~ "Data Engineering",
+      str_detect(job_title, "Analyst")             ~ "Data Analysis",
+      str_detect(job_title, "Machine Learning|ML") ~ "Machine Learning",
+      str_detect(job_title, "Manager|Lead|Head")   ~ "Management",
+      TRUE                                          ~ "Other"
+    )
+  ) %>%
+  select(-any_of(c("salary", "salary_currency")))
+
+write_csv(cleaned_data, "data_clean.csv")
+dim(cleaned_data)
+```
+
+# Exploratory Data Analysis
+
+## Experience level vs. salary
+
+```{r eda-experience}
+ggplot(cleaned_data, aes(x = experience_level, y = salary_in_usd, fill = experience_level)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(title = "Does Experience Actually Pay Off?",
+       subtitle = "Salary distribution across experience levels",
+       x = "Level of Experience", y = "Salary (USD)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Salary distribution
+
+```{r eda-distribution}
+ggplot(cleaned_data, aes(x = salary_in_usd)) +
+  geom_histogram(fill = "#2d5a3f", color = "white", bins = 30) +
+  scale_x_continuous(labels = label_dollar()) +
+  labs(title = "The Spread of Data Science Salaries",
+       subtitle = "Most salaries cluster between $100k and $200k",
+       x = "Salary (USD)", y = "Number of Employees") +
+  theme_minimal()
+```
+
+## Average salary by job category
+
+```{r eda-job-category}
+category_summary <- cleaned_data %>%
+  group_by(job_category) %>%
+  summarise(avg_salary = mean(salary_in_usd), .groups = "drop") %>%
+  arrange(desc(avg_salary))
+
+ggplot(category_summary,
+       aes(x = reorder(job_category, avg_salary), y = avg_salary, fill = job_category)) +
+  geom_col() + coord_flip() +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(title = "Which Field Pays the Best?",
+       x = "Job Category", y = "Average Salary (USD)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Remote vs. on-site
+
+```{r eda-remote}
+ggplot(cleaned_data, aes(x = work_models, y = salary_in_usd, fill = work_models)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, color = "black", outlier.shape = NA) +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(title = "Remote vs. On-site: Is There a Pay Gap?",
+       x = "Work Model", y = "Salary (USD)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Company size
+
+```{r eda-company-size}
+ggplot(cleaned_data, aes(x = company_size, y = salary_in_usd, fill = company_size)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(title = "Does Company Size Matter?",
+       x = "Company Size", y = "Salary (USD)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+## Top 10 locations by average salary
+
+```{r eda-geo}
+geo_summary <- cleaned_data %>%
+  group_by(company_location) %>%
+  filter(n() > 10) %>%
+  summarise(avg_salary = mean(salary_in_usd), .groups = "drop") %>%
+  arrange(desc(avg_salary)) %>%
+  slice_head(n = 10)
+
+ggplot(geo_summary, aes(x = reorder(company_location, avg_salary), y = avg_salary)) +
+  geom_col(fill = "#5a8a6e") + coord_flip() +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(title = "Top 10 Locations with Highest Average Salaries",
+       subtitle = "Only countries with more than 10 reported roles included",
+       x = "Country", y = "Average Salary (USD)") +
+  theme_minimal()
+```
+
+# Model
+
+```{r}
+model1 <- feols(
+  log_salary ~
+    experience_level +
+    work_models +
+    company_size +
+    work_year |
+    company_location,
+  
+  data = cleaned_data,
+  
+  vcov = "hetero"
+)
+summary(model1)
+```
+
+
+## Full-time employees only
+
+```{r}
+cleaned_data_fulltime <- cleaned_data %>%
+  filter(employment_type == "Full-time")
+
+model2 <- feols(
+  log_salary ~
+    experience_level +
+    work_models +
+    company_size +
+    work_year |
+    company_location,
+  
+  data = cleaned_data_fulltime,
+  
+  vcov = "hetero"
+)
+summary(model2)
+```
+
+## Employee-residence fixed effects
+
+```{r}
+model3 <- feols(
+  log_salary ~
+    experience_level +
+    work_models +
+    company_size +
+    work_year |
+    employee_residence,
+  
+  data = cleaned_data,
+  
+  vcov = "hetero"
+)
+summary(model3)
+```
+
+## Trimming the top 1% of salaries
+
+```{r robust-trimmed}
+salary_cutoff <- quantile(cleaned_data$salary_in_usd, 0.99)
+
+cleaned_data_trimmed <- cleaned_data %>%
+  filter(salary_in_usd < salary_cutoff)
+
+model4 <- feols(
+  log_salary ~
+    experience_level +
+    work_models +
+    company_size +
+    work_year |
+    company_location,
+  
+  data = cleaned_data_trimmed,
+  
+  vcov = "hetero"
+)
+summary(model4)
+```
+
+## Heterogeneous effect of remote work by experience
+
+```{r robust-interaction}
+model5 <- feols(
+  log_salary ~
+    experience_level * work_models +
+    company_size +
+    work_year |
+    company_location,
+  
+  data = cleaned_data,
+  
+  vcov = "hetero"
+)
+summary(model5)
+```
+
+# Results
+
+The main specification confirms the patterns visible in the EDA:
+salaries rise sharply with experience, and there is meaningful variation
+across work models and company sizes once country effects are absorbed.
+Coefficients are in log points and approximate percentage changes
+relative to the omitted category.
+
+## Combined regression table
+
+```{r results-table}
+modelsummary(
+  list(
+    "Main Model"     = model1,
+    "Full-Time Only" = model2,
+    "Residence FE"   = model3,
+    "Trimmed Sample" = model4,
+    "Remote x Exp."  = model5
+  ),
+  stars  = TRUE,
+  output = "markdown"
+)
+```
+# Robustness
+
+Columns 2–5 of the table above re-estimate the wage equation under
+alternative modelling choices.
+
+- **Full-time only (model 2):** restricting to full-time employees
+  removes part-time and contract workers as a source of noise.
+- **Employee-residence (model 3):** absorbing the worker's country
+  of residence rather than the company's location addresses concerns
+  about cross-border remote arrangements.
+- **Trimmed sample (model 4):** removing the top 1% of salaries checks
+  that extreme top earners are not driving the experience premium.
+- **Remote × experience (model 5):** allowing the remote-work effect
+  to vary by experience level tests whether the average premium hides
+  meaningful heterogeneity.
+
+Across all four alternatives, the experience-level coefficients remain
+large, positive, and ordered in the expected direction, and the
+work-model and company-size effects keep their sign and rough
+magnitude — indicating that the headline findings are not artefacts of
+sample composition or fixed-effects choice.
+
+# Conclusion
+
+The combined evidence suggests that experience is the single largest
+determinant of compensation in data science roles, with executive-level
+employees earning substantially more than entry-level peers even after
+absorbing country-level cost-of-living differences. Company size is
+positively associated with pay, while the remote-work premium is small
+on average but interacts with experience — senior workers benefit
+differently from remote arrangements than juniors. Results are stable
+across the full-time subsample, an alternative residence-based fixed
+effect, and a top-1% trimmed sample, indicating that the headline
+findings are not driven by part-time outliers, country mis-coding, or
+extreme top earners.
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```
